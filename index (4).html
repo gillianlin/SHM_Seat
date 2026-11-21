@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>教室選位系統</title>
+<style>
+:root{--bg:#f6f4ef;--fg:#2a2824;--muted:#7a756b;--card:#fffdf8;--line:#ddd7ca;--free:#e8f1e4;--freeb:#6a9a5b;--taken:#d9d5cc;--mine:#2f6fb5;--accent:#2f6fb5}
+@media (prefers-color-scheme:dark){:root{--bg:#1c1b19;--fg:#ece8df;--muted:#9a9488;--card:#262421;--line:#3a3732;--free:#2b3a28;--taken:#3a3732;--mine:#4a8fd6;--accent:#4a8fd6}}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;padding:16px}
+h1{font-size:20px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:13px;margin-bottom:14px}
+input{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);width:220px;max-width:100%;box-sizing:border-box}
+button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button.p{background:var(--accent);color:#fff;border-color:var(--accent)}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin:12px 0 10px;flex-wrap:wrap}
+.legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:4px}
+.wrap{overflow-x:auto;padding-bottom:8px}
+.room{min-width:640px;max-width:900px;margin:0 auto}
+.podium{width:180px;margin:0 auto 18px;text-align:center;padding:10px;border-radius:10px;background:var(--card);border:2px solid var(--line);font-weight:600}
+.blocks{display:flex;gap:28px;justify-content:center;align-items:flex-start}
+.block h3{font-size:12px;color:var(--muted);text-align:center;margin:0 0 8px;font-weight:500}
+.row{display:flex;gap:6px;justify-content:center;margin-bottom:8px;align-items:center}
+.rl{font-size:11px;color:var(--muted);width:18px;text-align:center}
+.seat{width:34px;height:34px;border-radius:8px 8px 4px 4px;border:1.5px solid var(--freeb);background:var(--free);color:var(--fg);font-size:11px;padding:0}
+.seat.taken{background:var(--taken);border-color:var(--line);color:var(--muted);cursor:not-allowed}
+.seat.mine{background:var(--mine);border-color:var(--mine);color:#fff}
+.msg{margin:12px 0;font-size:14px;min-height:20px}
+.err{color:#c0392b}
+.mask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:20px}
+.mask.on{display:flex}
+.dlg{background:var(--card);border-radius:14px;padding:20px;max-width:340px;width:100%}
+.dlg p{margin:0 0 14px;line-height:1.5}
+.dlg .b{display:flex;gap:8px;justify-content:flex-end}
+</style>
+</head>
+<body>
+<h1>教室選位</h1>
+<div class="sub">輸入姓名後點選空位。確認後即鎖定，無法更改或取消。</div>
+<input id="name" placeholder="你的姓名／學號" maxlength="20">
+<div class="legend">
+  <span><i style="background:var(--free);border:1.5px solid var(--freeb)"></i>可選</span>
+  <span><i style="background:var(--taken)"></i>已被選</span>
+  <span><i style="background:var(--mine)"></i>你的座位</span>
+</div>
+<div class="msg" id="msg"></div>
+<div class="wrap"><div class="room">
+  <div class="podium">講台</div>
+  <div class="blocks" id="blocks"></div>
+</div></div>
+
+<div class="mask" id="mask"><div class="dlg">
+  <p id="dtext"></p>
+  <div class="b"><button id="no">取消</button><button class="p" id="yes">確認選位</button></div>
+</div></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<script>
+// ====== 把 Firebase 控制台給你的設定貼到這裡 ======
+const firebaseConfig = {
+  apiKey: "AIzaSyAC16UnXAvodOTXrU4R3QPrJBHy8a6WWGo",
+  authDomain: "seat-chosen.firebaseapp.com",
+  projectId: "seat-chosen",
+  appId: "1:520154577410:web:ad40888343ab5d49ed051b"
+};
+// ===================================================
+
+const ROWS={L:[2,4,6,7,3],C:[3,5,7],R:[2,4,6,7,3]};
+const TITLE={L:'左區',C:'中區',R:'右區'};
+const seats={};
+let db=null,pending=null,busy=false;
+const $=id=>document.getElementById(id);
+const label=id=>{const m=id.match(/^([LCR])(\d+)-(\d+)$/);return TITLE[m[1]]+'第'+m[2]+'排第'+m[3]+'位'};
+const say=(t,e)=>{const m=$('msg');m.textContent=t||'';m.className='msg'+(e?' err':'')};
+const myName=()=>$('name').value.trim();
+const nameKey=n=>n.toLowerCase().replace(/[\/\s]/g,'_');
+function mySeatId(){const n=myName();if(!n)return null;for(const k in seats)if(seats[k]===n)return k;return null}
+
+function build(){
+  const box=$('blocks');
+  for(const z of ['L','C','R']){
+    const b=document.createElement('div');b.className='block';
+    const h=document.createElement('h3');h.textContent=TITLE[z];b.appendChild(h);
+    ROWS[z].forEach((cnt,ri)=>{
+      const r=document.createElement('div');r.className='row';
+      const l=document.createElement('span');l.className='rl';l.textContent=ri+1;r.appendChild(l);
+      for(let i=1;i<=cnt;i++){
+        const id=z+(ri+1)+'-'+i;
+        const s=document.createElement('button');s.className='seat';s.id='s-'+id;s.textContent=i;
+        s.onclick=()=>pick(id);r.appendChild(s);
+      }
+      b.appendChild(r);
+    });
+    box.appendChild(b);
+  }
+}
+function paint(){
+  const mine=mySeatId();
+  document.querySelectorAll('.seat').forEach(el=>{
+    const id=el.id.slice(2),t=id in seats;
+    el.className='seat'+(t?' taken':'')+(t&&mine===id?' mine':'');
+    el.textContent=t?(mine===id?'我':'✕'):id.split('-')[1];
+    el.title=label(id)+(t?'（已被選）':'');
+  });
+}
+function pick(id){
+  if(id in seats)return;
+  const n=myName();
+  if(!n){say('請先輸入姓名。',1);$('name').focus();return}
+  if(!db){say('尚未連線，請重新整理頁面。',1);return}
+  if(mySeatId()){say('你已經選過座位，無法再更改。',1);return}
+  pending=id;
+  $('dtext').textContent=n+'，你要選「'+label(id)+'」嗎？確認後無法更改。';
+  $('mask').classList.add('on');
+}
+$('no').onclick=()=>{pending=null;$('mask').classList.remove('on')};
+$('yes').onclick=async()=>{
+  if(busy||!pending)return;busy=true;
+  const id=pending,n=myName();pending=null;$('mask').classList.remove('on');
+  const seatRef=db.collection('seats').doc(id);
+  const nameRef=db.collection('names').doc(nameKey(n));
+  try{
+    await db.runTransaction(async tx=>{
+      const [s,p]=await Promise.all([tx.get(seatRef),tx.get(nameRef)]);
+      if(s.exists)throw new Error('taken');
+      if(p.exists)throw new Error('dup');
+      tx.set(seatRef,{name:n,at:Date.now()});
+      tx.set(nameRef,{seat:id});
+    });
+    say('選位成功：'+label(id)+'。');
+  }catch(e){
+    if(e.message==='taken')say('抱歉，這個座位剛被別人選走了。',1);
+    else if(e.message==='dup')say('這個姓名已經選過座位了。',1);
+    else say('選位失敗，請再試一次。',1);
+  }finally{busy=false}
+};
+$('name').addEventListener('input',()=>{paint();const m=mySeatId();if(m)say('你的座位：'+label(m)+'（已鎖定）');else say('')});
+
+build();paint();
+try{
+  firebase.initializeApp(firebaseConfig);
+  db=firebase.firestore();
+  db.collection('seats').onSnapshot(snap=>{
+    for(const k in seats)delete seats[k];
+    snap.forEach(d=>{seats[d.id]=d.data().name});
+    paint();const m=mySeatId();if(m)say('你的座位：'+label(m)+'（已鎖定）');
+  },()=>say('讀取座位資料失敗，請確認 Firebase 設定。',1));
+}catch(e){say('Firebase 尚未設定。',1)}
+</script>
+</body>
+</html>
